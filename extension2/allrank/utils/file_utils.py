@@ -3,7 +3,6 @@ import tempfile
 from typing import Any
 from urllib.parse import urlparse
 
-import gcsfs
 from attr import attrib, attrs
 from pkg_resources import Requirement, resource_filename
 
@@ -61,7 +60,11 @@ def is_gs_path(uri) -> bool:
 
 
 def open_local_or_gs(path, mode):
-    open_func = gcsfs.GCSFileSystem().open if is_gs_path(path) else open
+    if is_gs_path(path):
+        import gcsfs
+        open_func = gcsfs.GCSFileSystem().open
+    else:
+        open_func = open
     return open_func(path, mode)
 
 

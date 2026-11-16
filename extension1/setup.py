@@ -8,7 +8,10 @@ README = (HERE / "README.md").read_text()
 
 reqs = [
     "attrs>=19.3.0",
-    "flatten_dict>=0.3.0"
+    "flatten_dict>=0.3.0",
+    "tensorboard",
+    "tqdm",
+    "scikit-learn"
 ]
 
 setup(

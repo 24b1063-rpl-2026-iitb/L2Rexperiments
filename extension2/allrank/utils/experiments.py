@@ -4,7 +4,12 @@ from argparse import Namespace
 from typing import Dict, Any
 
 from attr import asdict
-from flatten_dict import flatten
+try:
+    from flatten_dict import flatten
+except ImportError:
+    import subprocess, sys
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", "flatten_dict"])
+    from flatten_dict import flatten
 
 from allrank.config import Config
 from allrank.utils.ltr_logging import get_logger

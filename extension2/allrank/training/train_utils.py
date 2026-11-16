@@ -35,24 +35,34 @@ def metric_on_batch(metric, model, xb, yb, indices):
 
 
 def metric_on_epoch(metric, model, dl, dev):
-    metric_values = torch.mean(
-        torch.cat(
-            [metric_on_batch(metric, model, xb.to(device=dev), yb.to(device=dev), indices.to(device=dev))
-             for xb, yb, indices in dl]
-        ), dim=0
-    ).cpu().numpy()
+    was_training = model.training
+    model.eval()
+    with torch.no_grad():
+        batch_metrics = []
+        for xb, yb, indices in dl:
+            res = metric_on_batch(metric, model, xb.to(device=dev), yb.to(device=dev), indices.to(device=dev))
+            batch_metrics.append(res.detach().cpu())
+        metric_values = torch.mean(
+            torch.cat(batch_metrics, dim=0), dim=0
+        ).numpy()
+    if was_training:
+        model.train()
     return metric_values
 
 
 def compute_metrics(metrics, model, dl, dev):
     metric_values_dict = {}
-    for metric_name, ats in metrics.items():
-        metric_func = getattr(metrics_module, metric_name)
-        metric_func_with_ats = partial(metric_func, ats=ats)
-        metrics_values = metric_on_epoch(metric_func_with_ats, model, dl, dev)
-        metrics_names = ["{metric_name}_{at}".format(metric_name=metric_name, at=at) for at in ats]
-        metric_values_dict.update(dict(zip(metrics_names, metrics_values)))
-
+    was_training = model.training
+    model.eval()
+    with torch.no_grad():
+        for metric_name, ats in metrics.items():
+            metric_func = getattr(metrics_module, metric_name)
+            metric_func_with_ats = partial(metric_func, ats=ats)
+            metrics_values = metric_on_epoch(metric_func_with_ats, model, dl, dev)
+            metrics_names = ["{metric_name}_{at}".format(metric_name=metric_name, at=at) for at in ats]
+            metric_values_dict.update(dict(zip(metrics_names, metrics_values)))
+    if was_training:
+        model.train()
     return metric_values_dict
 
 
@@ -100,10 +110,10 @@ def fit(epochs, model, loss_func, optimizer, scheduler, train_dl, valid_dl, conf
             train_nums.append(num)
 
         train_loss = np.sum(np.multiply(train_losses, train_nums)) / np.sum(train_nums)
-        train_metrics = compute_metrics(config.metrics, model, train_dl, device)
 
         model.eval()
         with torch.no_grad():
+            train_metrics = compute_metrics(config.metrics, model, train_dl, device)
             val_losses = []
             val_nums = []
             for xb, yb, indices in valid_dl:
