@@ -115,8 +115,8 @@ def normalize_and_save_split(in_path, out_path, means, stds, log_features, fneg,
                 dump_svmlight_file(X, y, out_f, query_id=q, zero_based=False)
 
 
-def process_fold(ds_path, fwl, fneg):
-    out_dir = f"{ds_path}_normalized"
+def process_fold(ds_path, fwl, fneg, output_dir=None):
+    out_dir = output_dir if output_dir else f"{ds_path}_normalized"
     os.makedirs(out_dir, exist_ok=True)
     t0 = time.time()
     print(f"\n{'='*65}\nProcessing: {ds_path}\nTarget:     {out_dir}\n{'='*65}", flush=True)
@@ -147,7 +147,8 @@ def process_fold(ds_path, fwl, fneg):
 if __name__ == "__main__":
     p = ArgumentParser(description="Streaming, memory-bounded normalizer for MSLR-WEB30K")
     p.add_argument("--ds_path", required=True, help="Path to fold, e.g. data/MSLR-WEB30K/Fold1")
+    p.add_argument("--output_dir", default=None, help="Optional output directory for normalized files")
     p.add_argument("--features_without_logarithm", type=int, nargs="*", default=FEATURES_WITHOUT_LOGARITHM)
     p.add_argument("--features_negative", type=int, nargs="*", default=FEATURES_NEGATIVE)
     args = p.parse_args()
-    process_fold(args.ds_path, args.features_without_logarithm, args.features_negative)
+    process_fold(args.ds_path, args.features_without_logarithm, args.features_negative, args.output_dir)

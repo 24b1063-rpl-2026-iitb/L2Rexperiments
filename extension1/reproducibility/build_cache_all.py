@@ -68,18 +68,29 @@ def cache_split(file_path):
 
 
 def main():
+    import argparse
+    parser = argparse.ArgumentParser(description="MSLR-WEB30K Binary Tensor Cache Builder")
+    parser.add_argument("--data_dir", default=None, help="Parent directory containing FoldN_normalized folders")
+    parser.add_argument("--fold_dir", default=None, help="Specific Fold directory to cache (e.g. /path/to/Fold1_normalized)")
+    args = parser.parse_args()
+
     print("=" * 65)
-    print("MSLR-WEB30K Binary Tensor Cache Builder (All 5 Folds)")
+    print("MSLR-WEB30K Binary Tensor Cache Builder")
     print("=" * 65)
     total_start = time.time()
 
-    for fold_num in range(1, 6):
-        fold_dir = os.path.join(BASE_DIR, f"Fold{fold_num}_normalized")
+    if args.fold_dir:
+        fold_dirs = [args.fold_dir]
+    elif args.data_dir:
+        fold_dirs = [os.path.join(args.data_dir, f"Fold{i}_normalized") for i in range(1, 6)]
+    else:
+        fold_dirs = [os.path.join(BASE_DIR, f"Fold{i}_normalized") for i in range(1, 6)]
+
+    for fold_dir in fold_dirs:
         if not os.path.exists(fold_dir):
-            print(f"[Warning] Directory not found: {fold_dir}")
             continue
 
-        print(f"\n>>> Processing Fold {fold_num}...")
+        print(f"\n>>> Processing {os.path.basename(fold_dir)}...")
         for split in ["train.txt", "vali.txt", "test.txt"]:
             file_path = os.path.join(fold_dir, split)
             if os.path.exists(file_path):
@@ -87,7 +98,7 @@ def main():
 
     total_elapsed = int(time.time() - total_start)
     print("=" * 65)
-    print(f"✓ All folds binary cached in {total_elapsed//60}m {total_elapsed%60}s!")
+    print(f"✓ Caching complete in {total_elapsed//60}m {total_elapsed%60}s!")
     print("=" * 65)
 
 
