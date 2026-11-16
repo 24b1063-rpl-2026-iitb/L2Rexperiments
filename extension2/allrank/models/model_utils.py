@@ -57,4 +57,7 @@ def load_state_dict_from_file(path: str, device: Any):
     if is_gs_path(path):
         path = copy_file_to_local(path)
 
-    return torch.load(path, map_location=device)
+    state_dict = torch.load(path, map_location=device)
+    if any(k.startswith("module.") for k in state_dict.keys()):
+        state_dict = {k.replace("module.", "", 1): v for k, v in state_dict.items()}
+    return state_dict
