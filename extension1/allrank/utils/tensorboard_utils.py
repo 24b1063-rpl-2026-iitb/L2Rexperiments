@@ -1,7 +1,10 @@
 import os
 from typing import Any, Dict, Tuple
 
-from tensorboardX import SummaryWriter
+try:
+    from tensorboardX import SummaryWriter
+except ImportError:
+    from torch.utils.tensorboard import SummaryWriter
 
 
 class TensorboardSummaryWriter:
