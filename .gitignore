@@ -3,6 +3,7 @@
 *$py.class
 *.pt
 *.txt
+!requirements.txt
 *.zip
 *.log
 results/
