@@ -4,7 +4,6 @@ from functools import partial
 import numpy as np
 import torch
 from torch.nn.utils import clip_grad_norm_
-from tqdm import tqdm
 
 import allrank.models.metrics as metrics_module
 from allrank.data.dataset_loading import PADDED_Y_VALUE
@@ -94,13 +93,11 @@ def fit(epochs, model, loss_func, optimizer, scheduler, train_dl, valid_dl, conf
 
         train_losses = []
         train_nums = []
-        train_pbar = tqdm(train_dl, desc=f"Epoch {epoch+1:03d}/{epochs:03d} [Train]", ncols=90, colour="green", leave=False)
-        for xb, yb, indices in train_pbar:
+        for xb, yb, indices in train_dl:
             loss_val, num = loss_batch(model, loss_func, xb.to(device=device), yb.to(device=device), indices.to(device=device),
                                        gradient_clipping_norm, optimizer)
             train_losses.append(loss_val)
             train_nums.append(num)
-            train_pbar.set_postfix({"loss": f"{loss_val:.4f}"})
 
         train_loss = np.sum(np.multiply(train_losses, train_nums)) / np.sum(train_nums)
         train_metrics = compute_metrics(config.metrics, model, train_dl, device)
@@ -109,8 +106,7 @@ def fit(epochs, model, loss_func, optimizer, scheduler, train_dl, valid_dl, conf
         with torch.no_grad():
             val_losses = []
             val_nums = []
-            val_pbar = tqdm(valid_dl, desc=f"Epoch {epoch+1:03d}/{epochs:03d} [Val]  ", ncols=90, colour="cyan", leave=False)
-            for xb, yb, indices in val_pbar:
+            for xb, yb, indices in valid_dl:
                 loss_val, num = loss_batch(model, loss_func, xb.to(device=device), yb.to(device=device), indices.to(device=device),
                                            gradient_clipping_norm)
                 val_losses.append(loss_val)
