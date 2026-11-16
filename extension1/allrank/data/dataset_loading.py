@@ -234,8 +234,9 @@ def load_libsvm_role(input_path: str, role: str) -> LibSVMDataset:
     :return: LibSVMDataset from file {input_path}/{role}.txt
     """
     path = os.path.join(input_path, "{}.txt".format(role))
+    cache_path = os.path.join(input_path, "{}.pt".format(role))
     logger.info("will load {} data from {}".format(role, path))
-    if not is_gs_path(path) and os.path.exists(path):
+    if os.path.exists(cache_path) or (not is_gs_path(path) and os.path.exists(path)):
         ds = LibSVMDataset.from_cached_or_svm(path)
     else:
         with open_local_or_gs(path, "rb") as input_stream:
