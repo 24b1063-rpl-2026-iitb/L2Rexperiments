@@ -147,11 +147,22 @@ class IntraFeatureAttention(nn.Module):
         # Flatten slates into individual documents
         x_flat = x.view(b * s, f)
 
-        # Step 1: Continuous feature tokenization -> [B * S, F, d_model]
-        tokens = self.tokenizer(x_flat)
+        # Micro-chunking across documents:
+        # Prevents allocating massive [B * S, F, d_model] tensors in VRAM (e.g. 30,000+ docs in large slates).
+        # Since intra-feature attention operates strictly within each document, chunking is mathematically exact.
+        chunk_size = 1024
+        total_docs = b * s
+        if total_docs <= chunk_size:
+            tokens = self.tokenizer(x_flat)
+            doc_embeddings = self.readout(tokens)
+        else:
+            chunks = []
+            for i in range(0, total_docs, chunk_size):
+                chunk_x = x_flat[i : i + chunk_size]
+                chunk_tokens = self.tokenizer(chunk_x)
+                chunk_embed = self.readout(chunk_tokens)
+                chunks.append(chunk_embed)
+            doc_embeddings = torch.cat(chunks, dim=0)
 
-        # Step 2: Latent cross-attention readout -> [B * S, d_model]
-        doc_embeddings = self.readout(tokens)
-
-        # Step 3: Reshape back to slate dimensions -> [Batch, SlateLength, d_model]
+        # Reshape back to slate dimensions -> [Batch, SlateLength, d_model]
         return doc_embeddings.view(b, s, self.d_model)
