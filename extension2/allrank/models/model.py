@@ -68,7 +68,11 @@ class LTRModel(nn.Module):
         :param indices: original item ranks used in positional encoding, shape [batch_size, slate_length]
         :return: encoder output of shape [batch_size, slate_length, encoder_output_dim]
         """
-        return self.encoder(self.input_layer(x), mask, indices)
+        if isinstance(self.input_layer, IntraFeatureAttention):
+            x_input = self.input_layer(x, mask)
+        else:
+            x_input = self.input_layer(x)
+        return self.encoder(x_input, mask, indices)
 
     def forward(self, x, mask, indices):
         """
@@ -165,12 +169,16 @@ def make_model(fc_model, transformer, post_model, n_features):
             n_heads = intra_cfg.get("n_heads", 4) if isinstance(intra_cfg, dict) else 4
             d_ff = intra_cfg.get("d_ff", 288) if isinstance(intra_cfg, dict) else 288
             dropout = intra_cfg.get("dropout", 0.1) if isinstance(intra_cfg, dict) else 0.1
+            chunk_size = intra_cfg.get("chunk_size", 1024) if isinstance(intra_cfg, dict) else 1024
+            mask_aware = intra_cfg.get("mask_aware", True) if isinstance(intra_cfg, dict) else True
             fc_model = IntraFeatureAttention(
                 n_features=n_features,
                 d_model=d_model,
                 n_heads=n_heads,
                 d_ff=d_ff,
-                dropout=dropout
+                dropout=dropout,
+                chunk_size=chunk_size,
+                mask_aware=mask_aware
             )
         else:
             fc_dict = {k: v for k, v in fc_model.items() if k != "intra_feature"} if isinstance(fc_model, dict) else fc_model

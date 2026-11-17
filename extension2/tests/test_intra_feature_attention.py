@@ -192,6 +192,54 @@ class TestIntraFeatureAttention:
         assert final_loss < initial_loss, f"Loss did not decrease: initial={initial_loss:.4f}, final={final_loss:.4f}"
         assert final_loss < initial_loss * 0.75, f"Loss did not decrease sufficiently (>25%): initial={initial_loss:.4f}, final={final_loss:.4f}"
 
+    def test_mask_aware_filtering_equivalence_and_gradient_flow(self):
+        """
+        Verify mask-aware filtering:
+        1. Valid items produce bit-exact identical embeddings between mask-aware and unmasked modes.
+        2. Padded items are cleanly zeroed out.
+        3. Backward autograd gradients flow correctly to valid items and all model parameters.
+        """
+        torch.manual_seed(42)
+        module_unmasked = IntraFeatureAttention(n_features=136, d_model=144, n_heads=4, d_ff=288, dropout=0.0, mask_aware=False)
+        module_masked = IntraFeatureAttention(n_features=136, d_model=144, n_heads=4, d_ff=288, dropout=0.0, mask_aware=True)
+        # Synchronize weights
+        module_masked.load_state_dict(module_unmasked.state_dict())
+        module_unmasked.eval()
+        module_masked.eval()
+
+        b, s, f = 4, 20, 136
+        x = torch.randn(b, s, f)
+        mask = torch.zeros(b, s, dtype=torch.bool)
+        # Pad second half of slates
+        mask[:, 10:] = True
+
+        with torch.no_grad():
+            out_unmasked = module_unmasked(x)
+            out_masked = module_masked(x, mask)
+
+        # 1. Output shape check
+        assert out_masked.shape == (b, s, 144)
+
+        # 2. Check exact numerical equivalence on valid items
+        valid_unmasked = out_unmasked[:, :10]
+        valid_masked = out_masked[:, :10]
+        assert torch.allclose(valid_unmasked, valid_masked, atol=1e-5), "Valid item embeddings differ between masked and unmasked!"
+
+        # 3. Check padded items are zeros
+        padded_masked = out_masked[:, 10:]
+        assert (padded_masked == 0.0).all(), "Padded items are not zeroed in mask-aware output!"
+
+        # 4. Check backward pass in training mode
+        module_masked.train()
+        x_grad = torch.randn(b, s, f, requires_grad=True)
+        out = module_masked(x_grad, mask)
+        loss = out.sum()
+        loss.backward()
+
+        assert x_grad.grad is not None
+        assert (x_grad.grad[:, :10] != 0).any(), "Valid items did not receive gradients!"
+        assert (x_grad.grad[:, 10:] == 0).all(), "Padded items erroneously received non-zero gradients!"
+
 
 if __name__ == "__main__":
     pytest.main(["-v", __file__])

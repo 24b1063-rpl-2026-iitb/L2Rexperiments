@@ -10,7 +10,8 @@
       "intra_feature": {
         "n_heads": 4,
         "d_ff": 288,
-        "dropout": 0.1
+        "dropout": 0.1,
+        "mask_aware": true
       }
     },
     "transformer": {
