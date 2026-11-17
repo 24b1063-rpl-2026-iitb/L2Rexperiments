@@ -181,7 +181,7 @@ def attention(query, key, value, mask=None, competitor_mask=None, competitor_dis
     scores = torch.matmul(query, key.transpose(-2, -1)) / math.sqrt(d_k)
 
     if competitor_dist is not None:
-        scores = scores + competitor_dist
+        scores += competitor_dist
 
     if mask is not None:
         scores = scores.masked_fill(mask == 1, float("-inf"))
@@ -190,10 +190,12 @@ def attention(query, key, value, mask=None, competitor_mask=None, competitor_dis
         scores = scores.masked_fill(~competitor_mask, float("-inf"))
 
     p_attn = F.softmax(scores, dim=-1)
+    del scores
     p_attn = torch.nan_to_num(p_attn, nan=0.0)
+    attn_weights = p_attn.detach()
     if dropout is not None:
         p_attn = dropout(p_attn)
-    return torch.matmul(p_attn, value), p_attn
+    return torch.matmul(p_attn, value), attn_weights
 
 
 class MultiHeadedAttention(nn.Module):

@@ -50,6 +50,12 @@ class CustomDataParallel(nn.DataParallel):
         :param indices: original item ranks used in positional encoding, shape [batch_size, slate_length]
         :return: scores of shape [batch_size, slate_length]
         """
+        chunk_size = 16
+        if x.size(0) > chunk_size and x.size(1) > 256:
+            scores = []
+            for i in range(0, x.size(0), chunk_size):
+                scores.append(self.module.score(x[i : i + chunk_size], mask[i : i + chunk_size], indices[i : i + chunk_size]))
+            return torch.cat(scores, dim=0)
         return self.module.score(x, mask, indices)  # type: ignore
 
 

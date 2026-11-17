@@ -78,6 +78,16 @@ class LTRModel(nn.Module):
         :param indices: original item ranks used in positional encoding, shape [batch_size, slate_length]
         :return: model output of shape [batch_size, slate_length, output_dim]
         """
+        chunk_size = 16
+        if not self.training and x.size(0) > chunk_size and x.size(1) > 256:
+            import torch
+            outputs = []
+            for i in range(0, x.size(0), chunk_size):
+                sub_x = x[i : i + chunk_size]
+                sub_mask = mask[i : i + chunk_size]
+                sub_indices = indices[i : i + chunk_size]
+                outputs.append(self.output_layer(self.prepare_for_output(sub_x, sub_mask, sub_indices)))
+            return torch.cat(outputs, dim=0)
         return self.output_layer(self.prepare_for_output(x, mask, indices))
 
     def score(self, x, mask, indices):
@@ -90,6 +100,16 @@ class LTRModel(nn.Module):
         :param indices: original item ranks used in positional encoding, shape [batch_size, slate_length]
         :return: scores of shape [batch_size, slate_length]
         """
+        chunk_size = 16
+        if x.size(0) > chunk_size and x.size(1) > 256:
+            import torch
+            scores = []
+            for i in range(0, x.size(0), chunk_size):
+                sub_x = x[i : i + chunk_size]
+                sub_mask = mask[i : i + chunk_size]
+                sub_indices = indices[i : i + chunk_size]
+                scores.append(self.output_layer.score(self.prepare_for_output(sub_x, sub_mask, sub_indices)))
+            return torch.cat(scores, dim=0)
         return self.output_layer.score(self.prepare_for_output(x, mask, indices))
 
 
