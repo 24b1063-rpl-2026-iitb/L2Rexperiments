@@ -57,31 +57,14 @@ class Encoder(nn.Module):
         if self.position:
             x = self.position(x, mask, indices)
 
-        competitor_mask = None
-        competitor_dist = None
+        p = None
         if self.sparse_k is not None:
-            slate_length = x.size(1)
-            k = min(self.sparse_k, slate_length)
-
             # 1) Compute preliminary scalar relevance scores
             p = self.pre_scorer(x).squeeze(-1)  # [batch_size, slate_length]
 
-            # 2) Pairwise similarity based on competitor proximity: S_ij = -|p_i - p_j|
-            diff = -torch.abs(p.unsqueeze(-1) - p.unsqueeze(-2))  # [batch_size, slate_length, slate_length]
-            competitor_dist = diff
-
-            # 3) Mask padded candidates in the candidate dimension so padding is never selected as top-k
-            diff_masked = diff.masked_fill(mask.unsqueeze(1) == 1, float("-inf"))
-
-            # 4) Extract top-k nearest competitors
-            _, topk_indices = torch.topk(diff_masked, k=k, dim=-1)
-
-            # 5) Build boolean competitor mask [batch_size, slate_length, slate_length]
-            competitor_mask = torch.zeros_like(diff, dtype=torch.bool).scatter_(-1, topk_indices, True)
-
         mask = mask.unsqueeze(-2)
         for layer in self.layers:
-            x = layer(x, mask, competitor_mask, competitor_dist)
+            x = layer(x, mask, p=p, sparse_k=self.sparse_k)
         return self.norm(x)
 
 
@@ -152,42 +135,34 @@ class EncoderLayer(nn.Module):
         self.sublayer = clones(SublayerConnection(size, dropout), 2)
         self.size = size
 
-    def forward(self, x, mask, competitor_mask=None, competitor_dist=None):
+    def forward(self, x, mask, p=None, sparse_k=None):
         """
         Forward pass through the encoder block.
         :param x: input of shape [batch_size, slate_length, self.size]
         :param mask: padding mask of shape [batch_size, 1, slate_length]
-        :param competitor_mask: top-k neighbor mask of shape [batch_size, slate_length, slate_length]
-        :param competitor_dist: soft distance bias of shape [batch_size, slate_length, slate_length]
+        :param p: preliminary relevance prior scores [batch_size, slate_length]
+        :param sparse_k: competitor window size
         :return: output of shape [batch_size, slate_length, self.size]
         """
-        x = self.sublayer[0](x, lambda inp: self.self_attn(inp, inp, inp, mask, competitor_mask, competitor_dist))
+        x = self.sublayer[0](x, lambda inp: self.self_attn(inp, inp, inp, mask=mask, p=p, sparse_k=sparse_k))
         return self.sublayer[1](x, self.feed_forward)
 
 
-def attention(query, key, value, mask=None, competitor_mask=None, competitor_dist=None, dropout=None):
+def attention(query, key, value, mask=None, dropout=None):
     """
-    Scaled Dot Product Attention computation with optional competitive sparse masking.
+    Standard Scaled Dot Product Attention computation.
     :param query: query set of shape [batch_size, n_attention_heads, slate_size, attention_dim]
     :param key: key set of shape [batch_size, n_attention_heads, slate_size, attention_dim]
     :param value: value set of shape [batch_size, n_attention_heads, slate_size, attention_dim]
     :param mask: padding mask of shape [batch_size, 1, 1, slate_length]
-    :param competitor_mask: top-k neighbor mask of shape [batch_size, 1, slate_length, slate_length]
-    :param competitor_dist: soft distance bias of shape [batch_size, 1, slate_length, slate_length]
     :param dropout: dropout probability
     :return: attention scores of shape [batch_size, n_attention_heads, slate_size, attention_dim]
     """
     d_k = query.size(-1)
     scores = torch.matmul(query, key.transpose(-2, -1)) / math.sqrt(d_k)
 
-    if competitor_dist is not None:
-        scores += competitor_dist
-
     if mask is not None:
         scores = scores.masked_fill(mask == 1, float("-inf"))
-
-    if competitor_mask is not None:
-        scores = scores.masked_fill(~competitor_mask, float("-inf"))
 
     p_attn = F.softmax(scores, dim=-1)
     del scores
@@ -196,6 +171,74 @@ def attention(query, key, value, mask=None, competitor_mask=None, competitor_dis
     if dropout is not None:
         p_attn = dropout(p_attn)
     return torch.matmul(p_attn, value), attn_weights
+
+
+def fast_sliding_window_attention(query, key, value, p, mask=None, K=32, dropout=None):
+    """
+    1D-Sorted Sliding Window Sparse Attention computation with O(N * K) complexity.
+    :param query: query set of shape [batch_size, n_attention_heads, slate_size, attention_dim]
+    :param key: key set of shape [batch_size, n_attention_heads, slate_size, attention_dim]
+    :param value: value set of shape [batch_size, n_attention_heads, slate_size, attention_dim]
+    :param p: 1D relevance prior of shape [batch_size, slate_size]
+    :param mask: padding mask of shape [batch_size, 1, slate_size] or [batch_size, slate_size]
+    :param K: competitor window size
+    :param dropout: dropout probability
+    :return: output tensor [batch_size, n_attention_heads, slate_size, attention_dim], attention weights
+    """
+    B, H, N, D_k = query.shape
+    K = min(K, N)
+    pad_left = K // 2
+    pad_right = K - 1 - pad_left
+
+    # 1. 1D sort of prior p (O(N log N) < 0.02 ms)
+    sort_indices = torch.argsort(p, dim=-1)  # [B, N]
+    sort_idx_exp = sort_indices.unsqueeze(1).unsqueeze(-1).expand(B, H, N, D_k)
+    inv_indices = torch.argsort(sort_indices, dim=-1).unsqueeze(1).unsqueeze(-1).expand(B, H, N, D_k)
+
+    q_s = torch.gather(query, dim=2, index=sort_idx_exp)
+    k_s = torch.gather(key, dim=2, index=sort_idx_exp)
+    v_s = torch.gather(value, dim=2, index=sort_idx_exp)
+    p_s = torch.gather(p, dim=1, index=sort_indices)
+
+    # 2. Window extraction via unfold
+    pad_k = (0, 0, pad_left, pad_right)
+    k_padded = F.pad(k_s, pad_k, mode='replicate')
+    v_padded = F.pad(v_s, pad_k, mode='replicate')
+
+    k_neighbors = k_padded.unfold(dimension=2, size=K, step=1)  # [B, H, N, D_k, K]
+    v_neighbors = v_padded.unfold(dimension=2, size=K, step=1).transpose(-1, -2)  # [B, H, N, K, D_k]
+
+    # 3. Attention scores: [B, H, N, K]
+    scores = torch.matmul(q_s.unsqueeze(-2), k_neighbors).squeeze(-2) / math.sqrt(D_k)
+
+    # 4. Extract and add 1D Soft Distance Bias (-|p_i - p_j|)
+    p_padded = F.pad(p_s, (pad_left, pad_right), mode='replicate')
+    p_neighbors = p_padded.unfold(dimension=1, size=K, step=1)  # [B, N, K]
+    dist_bias = -torch.abs(p_s.unsqueeze(-1) - p_neighbors).unsqueeze(1)  # [B, 1, N, K]
+    scores = scores + dist_bias
+
+    # 5. Boundary Masking (-1e9 over padded out-of-bounds positions)
+    pad_bool = torch.zeros(B, N, device=query.device, dtype=torch.bool)
+    pad_mask = F.pad(pad_bool, (pad_left, pad_right), value=True).unfold(1, K, 1).unsqueeze(1)
+    scores = scores.masked_fill(pad_mask, float("-inf"))
+
+    # 6. Padding candidate masking (if query has padded docs)
+    if mask is not None:
+        mask_2d = (mask == 1).squeeze(1) if mask.dim() == 3 else (mask == 1)
+        mask_s = torch.gather(mask_2d, dim=1, index=sort_indices)
+        mask_neighbors = F.pad(mask_s, (pad_left, pad_right), value=True).unfold(1, K, 1).unsqueeze(1)
+        scores = scores.masked_fill(mask_neighbors, float("-inf"))
+
+    # 7. Softmax and restore original document ordering
+    p_attn = F.softmax(scores, dim=-1)
+    p_attn = torch.nan_to_num(p_attn, nan=0.0)
+    attn_weights = p_attn.detach()
+    if dropout is not None:
+        p_attn = dropout(p_attn)
+
+    out_s = torch.matmul(p_attn.unsqueeze(-2), v_neighbors).squeeze(-2)  # [B, H, N, D_k]
+    out = torch.gather(out_s, dim=2, index=inv_indices)  # [B, H, N, D_k]
+    return out, attn_weights
 
 
 class MultiHeadedAttention(nn.Module):
@@ -217,25 +260,17 @@ class MultiHeadedAttention(nn.Module):
         self.attn = None
         self.dropout = nn.Dropout(p=dropout)
 
-    def forward(self, query, key, value, mask=None, competitor_mask=None, competitor_dist=None):
+    def forward(self, query, key, value, mask=None, p=None, sparse_k=None):
         """
         Forward pass through the multi-head attention block.
         :param query: query set of shape [batch_size, slate_size, self.d_model]
         :param key: key set of shape [batch_size, slate_size, self.d_model]
         :param value: value set of shape [batch_size, slate_size, self.d_model]
         :param mask: padding mask of shape [batch_size, 1, slate_length]
-        :param competitor_mask: top-k competitor mask of shape [batch_size, slate_length, slate_length]
-        :param competitor_dist: soft distance bias of shape [batch_size, slate_length, slate_length]
+        :param p: preliminary relevance prior scores [batch_size, slate_length]
+        :param sparse_k: competitor window size
         :return: output of shape [batch_size, slate_size, self.d_model]
         """
-        if mask is not None:
-            # same mask applied to all h heads
-            mask = mask.unsqueeze(1)
-        if competitor_mask is not None:
-            # same competitor mask applied to all h heads
-            competitor_mask = competitor_mask.unsqueeze(1)
-        if competitor_dist is not None:
-            competitor_dist = competitor_dist.unsqueeze(1)
         nbatches = query.size(0)
 
         # 1) Do all the linear projections in batch from d_model => h x d_k
@@ -244,7 +279,14 @@ class MultiHeadedAttention(nn.Module):
              for linear, x in zip(self.linears, (query, key, value))]
 
         # 2) Apply attention on all the projected vectors in batch.
-        x, self.attn = attention(query, key, value, mask=mask, competitor_mask=competitor_mask, competitor_dist=competitor_dist, dropout=self.dropout)
+        if sparse_k is not None and p is not None:
+            x, self.attn = fast_sliding_window_attention(
+                query, key, value, p=p, mask=mask, K=sparse_k, dropout=self.dropout
+            )
+        else:
+            if mask is not None:
+                mask = mask.unsqueeze(1)
+            x, self.attn = attention(query, key, value, mask=mask, dropout=self.dropout)
 
         # 3) "Concat" using a view and apply a final linear.
         x = x.transpose(1, 2).contiguous() \
