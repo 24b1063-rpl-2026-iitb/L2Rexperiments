@@ -1,71 +1,52 @@
 # Extension 1: Competitive Sparse Attention for Learning to Rank
 
-## 1. Overview & Theoretical Formulation
+## 1. Overview
 
-In Learning to Rank (LTR) architectures using Transformer encoders (such as *allRank*), self-attention models cross-document dependencies across the entire query slate.
+In Transformer-based Learning to Rank (LTR) models, standard self-attention computes pairwise interactions across all $\mathcal{O}(N^2)$ document pairs in a query slate of length $N$. However, top-position ranking metrics (such as NDCG@5) depend primarily on fine-grained distinctions among closely competing documents rather than distant, irrelevant items.
 
-### Complexity Comparison
-* **Standard Attention Complexity:** $\mathcal{O}(n^2)$ across all document pairs in a query slate of length $n$.
-* **Competitive Sparse Attention Complexity:** $\mathcal{O}(n \cdot k)$ or $\mathcal{O}(n \cdot (k + \log n))$ where $k \ll n$ by restricting attention to a document's local competitor neighborhood.
+**Competitive Sparse Attention** restricts each document's receptive field to its $K$ nearest competitors ($K \ll N$) in score space, reducing attention complexity from $\mathcal{O}(N^2)$ to $\mathcal{O}(N \cdot K)$:
 
-### Algorithmic Formulation
-1. **Preliminary Relevance Score:**  
-   Each document candidate $i$ is assigned an initial scalar score $p_i$ (e.g., via a 1D linear projection head from initial document embeddings or a strong pointwise feature).
-2. **Local Neighborhood Definition:**  
-   For document $i$, its local competitor neighborhood $N_i$ is dynamically defined as:
-   $$N_i = \text{TopK}_{j} \left( -|p_i - p_j| \right)$$
-3. **Sparse Attention Weighting:**  
-   The attention weights $A_{ij}$ are computed exclusively over the local neighborhood:
-   $$A_{ij} = \begin{cases} \text{Softmax}\left(\frac{q_i^T k_j}{\sqrt{d}}\right) & \text{for } j \in N_i \\ 0 & \text{otherwise} \end{cases}$$
+1. **Preliminary Relevance Prior:** A linear `pre_scorer` projects each document embedding $x_i \in \mathbb{R}^d$ to a 1D scalar score $p_i \in \mathbb{R}$.
+2. **1D Competitor Neighborhood:** Documents are sorted by $p_i$ in $\mathcal{O}(N \log N)$ time, turning nearest-competitor selection into a contiguous local sliding window of width $K$.
+3. **Soft Distance Bias & Sparse Attention:** Each document attends strictly to its $K$ window neighbors with an added 1D distance bias $-|p_i - p_j|$:
+   $$\text{Score}_{ij} = \frac{q_i^\top k_j}{\sqrt{d_k}} - |p_i - p_j|, \quad j \in \text{Window}_K(i)$$
 
 ---
 
-## 2. Implementation Difficulty
+## 2. Implementation
 
-**Difficulty Level:** Moderate (approx. **5/10 to 6/10**).
+Only **`allrank/models/transformer.py`** (along with `sparse_k` configuration in `allrank/config.py`) is modified, keeping all model parameter names compatible with standard checkpoints:
 
-The logic integrates cleanly into PyTorch without requiring low-level CUDA kernel modifications:
-* **Pointwise Pre-scoring:** A lightweight linear layer projects document representations $x \in \mathbb{R}^{B \times n \times d}$ to $p \in \mathbb{R}^{B \times n \times 1}$.
-* **Pairwise Distance Computation:** Pairwise distance $|p_i - p_j|$ is calculated via broadcasting in shape $(B, n, n)$.
-* **Top-K Masking:** `torch.topk` extracts the $k$ nearest candidate indices, creating a boolean neighborhood mask that is combined with the standard padding mask.
+* **`Encoder.forward`:** Computes preliminary scalar priors $p = \text{pre\_scorer}(x)$ once per slate and passes $p$ and `sparse_k` to each encoder block.
+* **`fast_sliding_window_attention`:**
+  1. Sorts $Q, K, V$, and $p$ in 1D along the slate dimension (`torch.argsort` + `torch.gather`).
+  2. Extracts contiguous $K$-sized neighbor windows via `F.pad` and `.unfold()` without materializing any $N \times N$ tensor.
+  3. Adds the 1D soft distance bias $-|p_i - p_j|$ and masks out-of-bounds boundary pads and padded documents (`-inf`).
+  4. Computes softmax attention over $N \times K$ pairs strictly and restores the original document order via inverse permutation.
 
----
-
-## 3. Files Requiring Modification
-
-Only **3 files** in the `allRank` codebase need modification:
-
-1. **`allrank/models/transformer.py`:**
-   * Extend the `attention()` function to accept a competitor mask (setting attention scores to $-\infty$ outside $N_i$).
-   * Update `MultiHeadedAttention` and `EncoderLayer` to pass this neighborhood constraint down to each head.
-2. **`allrank/models/model.py`:**
-   * In `LTRModel`, introduce an initial pointwise scoring head (`p = self.pre_scorer(x)`) before passing embeddings to the encoder.
-3. **`allrank/config.py`:**
-   * Add a `sparse_k: Optional[int] = None` field to `TransformerConfig` so sparse attention can be enabled, disabled, and tuned directly from JSON experiment configs without affecting standard runs.
+Verification in `tests/test_sparse_attention.py` passes all 5 unit tests (output shapes, sparsity bounds $\le K$, gradient flow to `pre_scorer`, and $N < K$ edge cases).
 
 ---
 
-## 4. Performance & Speed Analysis
+## 3. Results (MSLR-WEB30K, 5-Fold Cross-Validation & RTX 4060 GPU)
 
-### Theoretical vs. Practical Speed on RTX 4060 GPU
+### Ranking Quality (5-Fold CV, Slate Length $N = 240$)
 
-* **Theoretical Savings:**  
-  For a typical slate length of $n = 240$ with $k = 32$, theoretical attention comparisons are reduced by **$\approx 85\%$** ($\frac{32}{240} \approx 0.13$).
-* **Wall-Clock Speed Reality on GPU:**  
-  For $n = 240$, the dense matrix multiplication is already extremely small for modern Tensor Cores (taking $< 0.1\text{ ms}$).
-  * **Dense Masking (`masked_fill`):** Wall-clock training time per epoch will remain roughly identical because the full $240 \times 240$ matrix multiplication is still executed before masking.
-  * **Gathered Sparse Attention (`torch.gather`):** Index lookup and non-contiguous memory gather overhead on small matrices often offset the theoretical compute reduction in pure PyTorch unless specialized block-sparse kernels (e.g., FlashAttention / Triton) are used.
-  * **Large Slate Benefit:** If slate sizes expand to $n = 1,000$–$5,000$ documents (e.g., large-scale candidate re-ranking), computational savings become significant.
+| Model | Val NDCG@5 (Final) | Val NDCG@5 (Peak) | Val NDCG@10 | Val NDCG@30 |
+| :--- | :---: | :---: | :---: | :---: |
+| **Baseline Dense (Fold 1)** | `0.5259` | `0.5280` | `0.5480` | `0.6029` |
+| **Extension 1 ($K = 16$, 5-Fold Mean $\pm$ Std)** | `0.5158 ± 0.0036` | `0.5173 ± 0.0032` | `0.5356 ± 0.0026` | `0.5890 ± 0.0015` |
+| **Extension 1 ($K = 32$, 5-Fold Mean $\pm$ Std)** | `0.5206 ± 0.0025` | `0.5223 ± 0.0020` | `0.5405 ± 0.0018` | `0.5941 ± 0.0007` |
 
----
+* Increasing $K$ from 16 to 32 recovers ranking performance to within $\approx 0.005$ of the dense baseline while attending to only $\sim 13\%$ of the slate.
 
-## 5. Primary Value: Ranking Accuracy & Noise Reduction
+### Inference Latency Scaling (NVIDIA RTX 4060 GPU, $K = 32$)
 
-The primary motivation and expected benefit of this extension is **ranking quality (NDCG@5)** rather than raw wall-clock acceleration:
+| Candidate Slate Length ($N$) | Dense Baseline | Naive Masked-Fill | 1D Sliding Window (Ours) | Speedup vs. Naive | Speedup vs. Dense |
+| :---: | :---: | :---: | :---: | :---: | :---: |
+| **240** | `3.27 ms` | `3.78 ms` | `3.54 ms` | $1.07\times$ | $0.92\times$ |
+| **1,440** *(Crossover)* | `4.33 ms` | `5.62 ms` | **`3.51 ms`** | $1.60\times$ | **$1.23\times$** |
+| **2,880** | `14.98 ms` | `27.81 ms` | **`6.57 ms`** | $4.24\times$ | **$2.28\times$** |
+| **4,320** | `31.42 ms` | `61.50 ms` | **`9.45 ms`** | **$6.51\times$** | **$3.32\times$** |
 
-1. **Spurious Correlation & Noise Elimination:**  
-   In MSLR-WEB30K, each query slate contains up to 240 documents, but NDCG@5 evaluates only the top 5 positions. When top-tier documents attend to distant, irrelevant documents (e.g. rank 2 vs rank 210), spurious cross-document correlations inject noise into gradients.
-2. **Focused Representation Capacity:**  
-   Restricting context to $N_i$ forces the Transformer's self-attention mechanism to concentrate its expressive power exclusively on fine-grained margins between close competitors (e.g., distinguishing rank 2 from rank 3).
-3. **Structural Regularization:**  
-   Localizing the attention field acts as an inductive bias and regularizer, preventing the ranker from overfitting to arbitrary global combinations of documents within training slates.
+* Replacing eager $N \times N$ masking with the 1D-sorted sliding window eliminates the $18.66\text{M}$-element sorting bottleneck at $N = 4,320$, yielding a **$3.32\times$ speedup over dense attention** and a **$6.51\times$ speedup over naive sparsity**.
